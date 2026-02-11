@@ -9,6 +9,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var terminalDelegate: TerminalHandler!
     var setupController: SetupWindowController?
     var currentConfig: AppConfig?
+    var keyEventMonitor: Any?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
@@ -201,6 +202,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             execName: "-" + (shell as NSString).lastPathComponent,
             currentDirectory: workDir
         )
+
+        // Intercept Shift+Enter → send \n for Claude Code multiline input
+        keyEventMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let tv = self?.terminalView else { return event }
+            if event.modifierFlags.contains(.shift) && event.keyCode == 36 {
+                tv.send(txt: "\n")
+                return nil
+            }
+            return event
+        }
     }
 
     func buildEnvironment() -> [String] {
