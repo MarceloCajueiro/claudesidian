@@ -9,9 +9,9 @@
 	<key>CFBundleIdentifier</key>
 	<string>com.claudesidian.app</string>
 	<key>CFBundleName</key>
-	<string>Claudesidian</string>
+	<string>ClaudeSidian</string>
 	<key>CFBundleDisplayName</key>
-	<string>Claudesidian</string>
+	<string>ClaudeSidian</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleVersion</key>
