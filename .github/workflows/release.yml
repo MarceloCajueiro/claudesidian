@@ -1,0 +1,53 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Extract version from tag
+        id: version
+        run: |
+          TAG_NAME="${GITHUB_REF_NAME}"
+          VERSION="${TAG_NAME#v}"
+          echo "VERSION=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Stamp Info.plist version
+        env:
+          VERSION: ${{ steps.version.outputs.VERSION }}
+        run: |
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" Resources/Info.plist
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $VERSION" Resources/Info.plist
+
+      - name: Build Universal Binary
+        run: swift build -c release --arch arm64 --arch x86_64
+
+      - name: Assemble app bundle
+        run: |
+          APP_DIR="Claudesidian.app"
+          mkdir -p "$APP_DIR/Contents/"{MacOS,Resources}
+          cp .build/apple/Products/Release/Claudesidian "$APP_DIR/Contents/MacOS/Claudesidian"
+          cp Resources/Info.plist "$APP_DIR/Contents/Info.plist"
+          cp Resources/AppIcon.icns "$APP_DIR/Contents/Resources/AppIcon.icns"
+
+      - name: Create zip archive
+        env:
+          VERSION: ${{ steps.version.outputs.VERSION }}
+        run: ditto -c -k --keepParent Claudesidian.app "ClaudeSidian-${VERSION}-universal.zip"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ClaudeSidian-*.zip
+          generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}

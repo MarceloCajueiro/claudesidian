@@ -16,6 +16,12 @@ Originally built to run [Claude Code](https://docs.anthropic.com/en/docs/claude-
 
 ## Installation
 
+### Download
+
+Grab the latest `.zip` from [GitHub Releases](https://github.com/MarceloCajueiro/claudesidian/releases/latest), unzip, and move `Claudesidian.app` to your Applications folder.
+
+> **Note:** The app is unsigned. On first launch, macOS Gatekeeper will block it. Right-click the app and choose **Open**, then click **Open** again in the dialog. You only need to do this once.
+
 ### Build from source
 
 Requires Swift 5.9+ (included with Xcode 15+).
