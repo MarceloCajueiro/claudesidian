@@ -100,6 +100,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // Window menu
         let windowMenuItem = NSMenuItem()
         let windowMenu = NSMenu(title: "Window")
+        windowMenu.addItem(withTitle: "Close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
         windowMenu.addItem(withTitle: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
         windowMenu.addItem(withTitle: "Zoom", action: #selector(NSWindow.performZoom(_:)), keyEquivalent: "")
         windowMenuItem.submenu = windowMenu
@@ -175,7 +176,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         terminalView.caretColor = NSColor(red: 0.91, green: 0.59, blue: 0.41, alpha: 1.0)
         terminalView.nativeBackgroundColor = NSColor(red: 0.1, green: 0.1, blue: 0.12, alpha: 1.0)
         terminalView.nativeForegroundColor = NSColor(red: 0.9, green: 0.9, blue: 0.92, alpha: 1.0)
-        terminalView.optionAsMetaKey = true
+        terminalView.optionAsMetaKey = false
 
         // Delegate
         terminalDelegate = TerminalHandler(window: window, app: self)
