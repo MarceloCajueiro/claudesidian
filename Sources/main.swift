@@ -168,7 +168,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         let padding: CGFloat = 12
 
-        terminalView = LocalProcessTerminalView(frame: .zero)
+        terminalView = DroppableTerminalView(frame: .zero)
         terminalView.translatesAutoresizingMaskIntoConstraints = false
 
         // Appearance
@@ -243,6 +243,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             }
         }
 
+        // Enable OSC 8 hyperlink support (clickable file paths in Claude Code)
+        env.append("FORCE_HYPERLINK=1")
+
         return env
     }
 
@@ -264,6 +267,304 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     @objc func resetFont(_ sender: Any) {
         terminalView?.font = NSFont.monospacedSystemFont(ofSize: 14, weight: .regular)
+    }
+}
+
+// MARK: - Cursor Overlay
+
+/// Transparent view placed above the terminal to override SwiftTerm's iBeam cursor.
+/// AppKit's cursor rect system uses the topmost visible view — when this overlay is
+/// unhidden, its pointingHand cursor rect takes precedence over the terminal's iBeam.
+/// All mouse, keyboard, and scroll events are forwarded to the terminal underneath.
+class CursorOverlayView: NSView {
+    weak var targetView: NSView?
+
+    init(target: NSView) {
+        self.targetView = target
+        super.init(frame: .zero)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func resetCursorRects() {
+        addCursorRect(bounds, cursor: .pointingHand)
+    }
+
+    // Forward all input events to the terminal view
+    override func mouseDown(with event: NSEvent) { targetView?.mouseDown(with: event) }
+    override func mouseUp(with event: NSEvent) { targetView?.mouseUp(with: event) }
+    override func mouseDragged(with event: NSEvent) { targetView?.mouseDragged(with: event) }
+    override func rightMouseDown(with event: NSEvent) { targetView?.rightMouseDown(with: event) }
+    override func rightMouseUp(with event: NSEvent) { targetView?.rightMouseUp(with: event) }
+    override func otherMouseDown(with event: NSEvent) { targetView?.otherMouseDown(with: event) }
+    override func otherMouseUp(with event: NSEvent) { targetView?.otherMouseUp(with: event) }
+    override func scrollWheel(with event: NSEvent) { targetView?.scrollWheel(with: event) }
+    override func keyDown(with event: NSEvent) { targetView?.keyDown(with: event) }
+    override func keyUp(with event: NSEvent) { targetView?.keyUp(with: event) }
+    override func flagsChanged(with event: NSEvent) { targetView?.flagsChanged(with: event) }
+}
+
+// MARK: - Drag & Drop Terminal View
+
+class DroppableTerminalView: LocalProcessTerminalView {
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        registerForDraggedTypes([.fileURL])
+        setupFileClickMonitor()
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        registerForDraggedTypes([.fileURL])
+        setupFileClickMonitor()
+    }
+
+    // MARK: - Cmd+Click file path detection
+
+    private var clickMonitor: Any?
+    private var cursorMonitor: Any?
+    private var flagsMonitor: Any?
+    private var showingPointingHand = false
+
+    func setupFileClickMonitor() {
+        // Cmd+Click to open file paths
+        clickMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseUp) { [weak self] event in
+            guard let self = self,
+                  event.modifierFlags.contains(.command),
+                  let window = event.window,
+                  window === self.window else {
+                return event
+            }
+
+            let point = self.convert(event.locationInWindow, from: nil)
+            guard self.bounds.contains(point) else { return event }
+
+            let (col, row) = self.cellPosition(from: point)
+
+            // Skip if this cell has an OSC 8 payload (super already handles it)
+            if let cd = self.terminal.getCharData(col: col, row: row), cd.getPayload() != nil {
+                return event
+            }
+
+            if let path = self.resolveFilePath(displayRow: row, col: col) {
+                NSWorkspace.shared.open(URL(fileURLWithPath: path))
+                return nil
+            }
+
+            return event
+        }
+
+        // Cursor change on Cmd+hover over file paths
+        cursorMonitor = NSEvent.addLocalMonitorForEvents(matching: .mouseMoved) { [weak self] event in
+            guard let self = self else { return event }
+            self.updateCursorIfNeeded(for: event)
+            return event
+        }
+
+        flagsMonitor = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { [weak self] event in
+            guard let self = self else { return event }
+            if event.modifierFlags.contains(.command) {
+                self.updateCursorIfNeeded(for: event)
+            } else {
+                self.resetCursorIfNeeded()
+            }
+            return event
+        }
+    }
+
+    private var cursorOverlay: CursorOverlayView?
+
+    private func ensureOverlay() {
+        guard cursorOverlay == nil, let sv = superview else { return }
+        let overlay = CursorOverlayView(target: self)
+        overlay.translatesAutoresizingMaskIntoConstraints = false
+        overlay.isHidden = true
+        sv.addSubview(overlay, positioned: .above, relativeTo: self)
+        NSLayoutConstraint.activate([
+            overlay.topAnchor.constraint(equalTo: topAnchor),
+            overlay.bottomAnchor.constraint(equalTo: bottomAnchor),
+            overlay.leadingAnchor.constraint(equalTo: leadingAnchor),
+            overlay.trailingAnchor.constraint(equalTo: trailingAnchor),
+        ])
+        cursorOverlay = overlay
+    }
+
+    private func updateCursorIfNeeded(for event: NSEvent) {
+        guard event.modifierFlags.contains(.command),
+              let window = self.window else {
+            resetCursorIfNeeded()
+            return
+        }
+
+        let mouseLocation = window.mouseLocationOutsideOfEventStream
+        let point = convert(mouseLocation, from: nil)
+        guard bounds.contains(point) else {
+            resetCursorIfNeeded()
+            return
+        }
+
+        let (col, row) = cellPosition(from: point)
+
+        let hasLink: Bool
+        if let cd = terminal.getCharData(col: col, row: row), cd.getPayload() != nil {
+            hasLink = true
+        } else {
+            hasLink = resolveFilePath(displayRow: row, col: col) != nil
+        }
+
+        if hasLink {
+            if !showingPointingHand {
+                showingPointingHand = true
+                ensureOverlay()
+                cursorOverlay?.isHidden = false
+                window.invalidateCursorRects(for: cursorOverlay!)
+            }
+        } else {
+            resetCursorIfNeeded()
+        }
+    }
+
+    private func resetCursorIfNeeded() {
+        guard showingPointingHand else { return }
+        showingPointingHand = false
+        if let overlay = cursorOverlay {
+            overlay.isHidden = true
+            window?.invalidateCursorRects(for: overlay)
+        }
+        window?.invalidateCursorRects(for: self)
+    }
+
+    private func cellPosition(from point: CGPoint) -> (col: Int, row: Int) {
+        let cellWidth = frame.width / CGFloat(terminal.cols)
+        let cellHeight = frame.height / CGFloat(terminal.rows)
+        let col = min(max(0, Int(point.x / cellWidth)), terminal.cols - 1)
+        let row = min(max(0, Int((frame.height - point.y) / cellHeight)), terminal.rows - 1)
+        return (col, row)
+    }
+
+    /// Returns the expanded, validated file path if one exists under the cursor, or nil.
+    private func resolveFilePath(displayRow: Int, col: Int) -> String? {
+        guard let path = extractFilePath(displayRow: displayRow, col: col) else { return nil }
+        let expanded = (path as NSString).expandingTildeInPath
+        return FileManager.default.fileExists(atPath: expanded) ? expanded : nil
+    }
+
+    deinit {
+        if let m = clickMonitor { NSEvent.removeMonitor(m) }
+        if let m = cursorMonitor { NSEvent.removeMonitor(m) }
+        if let m = flagsMonitor { NSEvent.removeMonitor(m) }
+    }
+
+    private func extractFilePath(displayRow: Int, col: Int) -> String? {
+        let cols = terminal.cols
+
+        // Read all characters from this line
+        var chars: [Character] = []
+        for c in 0..<cols {
+            if let ch = terminal.getCharacter(col: c, row: displayRow) {
+                chars.append(ch)
+            } else {
+                chars.append(" ")
+            }
+        }
+
+        let lineStr = String(chars)
+        let stopChars = CharacterSet(charactersIn: "\"'`<>|;(){}[]")
+
+        // Find all potential path starts (/ or ~/) on this line
+        // and check if the clicked column falls within a valid path
+        var candidates: [(start: Int, path: String)] = []
+
+        for i in 0..<cols {
+            let ch = chars[i]
+            let isPathStart: Bool
+            if ch == "/" {
+                isPathStart = true
+            } else if ch == "~" && i + 1 < cols && chars[i + 1] == "/" {
+                isPathStart = true
+            } else if ch == "." && i + 1 < cols && chars[i + 1] == "/" {
+                isPathStart = true
+            } else {
+                isPathStart = false
+            }
+
+            guard isPathStart else { continue }
+
+            // Scan right from this start, allowing spaces but stopping at delimiters
+            var end = i
+            for j in i..<cols {
+                let c = chars[j]
+                // Stop at hard delimiters
+                if c.unicodeScalars.contains(where: { stopChars.contains($0) }) {
+                    break
+                }
+                // Stop at control characters / null
+                if c == "\0" || c.asciiValue.map({ $0 < 32 }) == true {
+                    break
+                }
+                end = j
+            }
+
+            if end >= i + 1 { // at least 2 chars
+                let startIdx = lineStr.index(lineStr.startIndex, offsetBy: i)
+                let endIdx = lineStr.index(lineStr.startIndex, offsetBy: end + 1)
+                var token = String(lineStr[startIdx..<endIdx])
+                    .trimmingCharacters(in: .whitespaces)
+                    .trimmingCharacters(in: CharacterSet(charactersIn: ",:"))
+
+                // Strip trailing :lineNumber
+                if let range = token.range(of: #":\d+$"#, options: .regularExpression) {
+                    token = String(token[token.startIndex..<range.lowerBound])
+                }
+
+                candidates.append((start: i, path: token))
+            }
+        }
+
+        // Find the longest candidate whose range includes the clicked column
+        // Prefer longer matches (more specific paths)
+        var bestMatch: String? = nil
+        for candidate in candidates {
+            let expanded = (candidate.path as NSString).expandingTildeInPath
+            let pathLen = candidate.path.count
+            let rangeEnd = candidate.start + pathLen - 1
+
+            if col >= candidate.start && col <= rangeEnd {
+                if bestMatch == nil || candidate.path.count > bestMatch!.count {
+                    if FileManager.default.fileExists(atPath: expanded) {
+                        bestMatch = candidate.path
+                    }
+                }
+            }
+        }
+
+        return bestMatch
+    }
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        if sender.draggingPasteboard.canReadObject(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) {
+            return .copy
+        }
+        return []
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        guard let urls = sender.draggingPasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] else {
+            return false
+        }
+
+        let paths = urls.map { shellEscape($0.path) }
+        let text = paths.joined(separator: " ")
+        send(txt: text)
+        return true
+    }
+
+    private func shellEscape(_ path: String) -> String {
+        if path.rangeOfCharacter(from: .init(charactersIn: " \t'\"\\!$`#&|;(){}[]<>?*~")) != nil {
+            let escaped = path.replacingOccurrences(of: "'", with: "'\\''")
+            return "'\(escaped)'"
+        }
+        return path
     }
 }
 
