@@ -1,145 +1,25 @@
 import AppKit
 import SwiftTerm
 
-// MARK: - App Delegate
+// MARK: - Terminal Window Controller
 
-class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
+class TerminalWindowController: NSObject, NSWindowDelegate {
     var window: NSWindow!
-    var terminalView: LocalProcessTerminalView!
+    var terminalView: DroppableTerminalView!
     var terminalDelegate: TerminalHandler!
-    var setupController: SetupWindowController?
-    var currentConfig: AppConfig?
     var keyEventMonitor: Any?
+    private let config: AppConfig
 
-    func applicationDidFinishLaunching(_ notification: Notification) {
-        NSApp.setActivationPolicy(.regular)
-
-        if let config = AppConfig.load() {
-            currentConfig = config
-            setupMenuBar()
-            setupWindow()
-            setupTerminal(with: config)
-            NSApp.activate(ignoringOtherApps: true)
-            window.makeKeyAndOrderFront(nil)
-            window.makeFirstResponder(terminalView)
-        } else {
-            setupMenuBar()
-            showSetup(config: nil)
-        }
-    }
-
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        return true
-    }
-
-    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        terminateChildProcess()
-        return .terminateNow
-    }
-
-    func windowWillClose(_ notification: Notification) {
-        terminateChildProcess()
-    }
-
-    private func terminateChildProcess() {
-        guard let tv = terminalView else { return }
-        let pid = tv.process.shellPid
-        guard pid != 0, tv.process.running else { return }
-
-        tv.terminate()
-
-        // Fallback: if still alive after 2s, SIGKILL
-        DispatchQueue.global().asyncAfter(deadline: .now() + 2) {
-            var status: Int32 = 0
-            let result = waitpid(pid, &status, WNOHANG)
-            if result == 0 {
-                kill(pid, SIGKILL)
-            }
-        }
-    }
-
-    // MARK: - Menu Bar
-
-    func setupMenuBar() {
-        let mainMenu = NSMenu()
-
-        // App menu
-        let appMenuItem = NSMenuItem()
-        let appMenu = NSMenu()
-        appMenu.addItem(withTitle: "About ClaudeSidian", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
-        appMenu.addItem(.separator())
-        appMenu.addItem(withTitle: "Settings...", action: #selector(openSettings(_:)), keyEquivalent: ",")
-        appMenu.addItem(.separator())
-        appMenu.addItem(withTitle: "Hide ClaudeSidian", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
-        let hideOthers = appMenu.addItem(withTitle: "Hide Others", action: #selector(NSApplication.hideOtherApplications(_:)), keyEquivalent: "h")
-        hideOthers.keyEquivalentModifierMask = [.command, .option]
-        appMenu.addItem(withTitle: "Show All", action: #selector(NSApplication.unhideAllApplications(_:)), keyEquivalent: "")
-        appMenu.addItem(.separator())
-        appMenu.addItem(withTitle: "Quit ClaudeSidian", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
-        appMenuItem.submenu = appMenu
-        mainMenu.addItem(appMenuItem)
-
-        // Edit menu (for copy/paste)
-        let editMenuItem = NSMenuItem()
-        let editMenu = NSMenu(title: "Edit")
-        editMenu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
-        editMenu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
-        editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
-        editMenuItem.submenu = editMenu
-        mainMenu.addItem(editMenuItem)
-
-        // View menu (font size)
-        let viewMenuItem = NSMenuItem()
-        let viewMenu = NSMenu(title: "View")
-        viewMenu.addItem(withTitle: "Bigger", action: #selector(biggerFont(_:)), keyEquivalent: "+")
-        viewMenu.addItem(withTitle: "Smaller", action: #selector(smallerFont(_:)), keyEquivalent: "-")
-        viewMenu.addItem(withTitle: "Reset Font Size", action: #selector(resetFont(_:)), keyEquivalent: "0")
-        viewMenuItem.submenu = viewMenu
-        mainMenu.addItem(viewMenuItem)
-
-        // Window menu
-        let windowMenuItem = NSMenuItem()
-        let windowMenu = NSMenu(title: "Window")
-        windowMenu.addItem(withTitle: "Close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
-        windowMenu.addItem(withTitle: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
-        windowMenu.addItem(withTitle: "Zoom", action: #selector(NSWindow.performZoom(_:)), keyEquivalent: "")
-        windowMenuItem.submenu = windowMenu
-        mainMenu.addItem(windowMenuItem)
-
-        NSApp.mainMenu = mainMenu
-        NSApp.windowsMenu = windowMenu
-    }
-
-    // MARK: - Settings
-
-    @objc func openSettings(_ sender: Any) {
-        let config = currentConfig ?? AppConfig.load()
-        setupController = SetupWindowController(config: config) { _ in
-            let alert = NSAlert()
-            alert.messageText = "Settings saved"
-            alert.informativeText = "Restart ClaudeSidian for changes to take effect."
-            alert.alertStyle = .informational
-            alert.addButton(withTitle: "OK")
-            alert.runModal()
-        }
-        setupController?.showWindow()
-    }
-
-    private func showSetup(config: AppConfig?) {
-        setupController = SetupWindowController(config: config) { [weak self] config in
-            self?.currentConfig = config
-            self?.setupWindow()
-            self?.setupTerminal(with: config)
-            NSApp.activate(ignoringOtherApps: true)
-            self?.window.makeKeyAndOrderFront(nil)
-            self?.window.makeFirstResponder(self?.terminalView)
-        }
-        setupController?.showWindow()
+    init(config: AppConfig) {
+        self.config = config
+        super.init()
+        setupWindow()
+        setupTerminal()
     }
 
     // MARK: - Window
 
-    func setupWindow() {
+    private func setupWindow() {
         let screenFrame = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1200, height: 800)
         let windowWidth: CGFloat = min(1000, screenFrame.width * 0.7)
         let windowHeight: CGFloat = min(700, screenFrame.height * 0.7)
@@ -159,11 +39,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window.titlebarAppearsTransparent = true
         window.backgroundColor = NSColor(red: 0.1, green: 0.1, blue: 0.12, alpha: 1.0)
         window.delegate = self
+        window.cascadeTopLeft(from: .zero)
     }
 
     // MARK: - Terminal
 
-    func setupTerminal(with config: AppConfig) {
+    private func setupTerminal() {
         guard let contentView = window.contentView else { return }
 
         let padding: CGFloat = 12
@@ -179,7 +60,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         terminalView.optionAsMetaKey = false
 
         // Delegate
-        terminalDelegate = TerminalHandler(window: window, app: self)
+        terminalDelegate = TerminalHandler(windowController: self)
         terminalView.processDelegate = terminalDelegate
 
         contentView.addSubview(terminalView)
@@ -191,7 +72,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             terminalView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -padding),
         ])
 
-        let env = buildEnvironment()
+        let env = TerminalWindowController.buildEnvironment()
         let (executable, args) = config.shellCommand()
         let workDir = config.expandedWorkingDirectory()
         let shell = AppConfig.userShell()
@@ -206,16 +87,17 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         // Intercept Shift+Enter → send \n for Claude Code multiline input
         keyEventMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            guard let tv = self?.terminalView else { return event }
+            guard let self = self,
+                  event.window === self.window else { return event }
             if event.modifierFlags.contains(.shift) && event.keyCode == 36 {
-                tv.send(txt: "\n")
+                self.terminalView.send(txt: "\n")
                 return nil
             }
             return event
         }
     }
 
-    func buildEnvironment() -> [String] {
+    static func buildEnvironment() -> [String] {
         var env = Terminal.getEnvironmentVariables(termName: "xterm-256color")
 
         let currentEnv = ProcessInfo.processInfo.environment
@@ -249,24 +131,205 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         return env
     }
 
-    // MARK: - Font Actions
+    func showWindow() {
+        window.makeKeyAndOrderFront(nil)
+        window.makeFirstResponder(terminalView)
+    }
+
+    // MARK: - Process Lifecycle
+
+    func terminateChildProcess() {
+        guard let tv = terminalView else { return }
+        let pid = tv.process.shellPid
+        guard pid != 0, tv.process.running else { return }
+
+        tv.terminate()
+
+        // Fallback: if still alive after 2s, SIGKILL
+        DispatchQueue.global().asyncAfter(deadline: .now() + 2) {
+            var status: Int32 = 0
+            let result = waitpid(pid, &status, WNOHANG)
+            if result == 0 {
+                kill(pid, SIGKILL)
+            }
+        }
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        terminateChildProcess()
+        if let m = keyEventMonitor { NSEvent.removeMonitor(m) }
+        keyEventMonitor = nil
+        if let appDelegate = NSApp.delegate as? AppDelegate {
+            appDelegate.windowControllerDidClose(self)
+        }
+    }
+
+    deinit {
+        if let m = keyEventMonitor { NSEvent.removeMonitor(m) }
+    }
+}
+
+// MARK: - App Delegate
+
+class AppDelegate: NSObject, NSApplicationDelegate {
+    var windowControllers: [TerminalWindowController] = []
+    var setupController: SetupWindowController?
+    var currentConfig: AppConfig?
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        NSApp.setActivationPolicy(.regular)
+
+        if let config = AppConfig.load() {
+            currentConfig = config
+            setupMenuBar()
+            let wc = createTerminalWindow(with: config)
+            NSApp.activate(ignoringOtherApps: true)
+            wc.showWindow()
+        } else {
+            setupMenuBar()
+            showSetup(config: nil)
+        }
+    }
+
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        return true
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        for wc in windowControllers {
+            wc.terminateChildProcess()
+        }
+        return .terminateNow
+    }
+
+    @discardableResult
+    func createTerminalWindow(with config: AppConfig) -> TerminalWindowController {
+        let wc = TerminalWindowController(config: config)
+        windowControllers.append(wc)
+        return wc
+    }
+
+    func windowControllerDidClose(_ controller: TerminalWindowController) {
+        windowControllers.removeAll { $0 === controller }
+    }
+
+    // MARK: - Menu Bar
+
+    func setupMenuBar() {
+        let mainMenu = NSMenu()
+
+        // App menu
+        let appMenuItem = NSMenuItem()
+        let appMenu = NSMenu()
+        appMenu.addItem(withTitle: "About ClaudeSidian", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+        appMenu.addItem(.separator())
+        appMenu.addItem(withTitle: "Settings...", action: #selector(openSettings(_:)), keyEquivalent: ",")
+        appMenu.addItem(.separator())
+        appMenu.addItem(withTitle: "Hide ClaudeSidian", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
+        let hideOthers = appMenu.addItem(withTitle: "Hide Others", action: #selector(NSApplication.hideOtherApplications(_:)), keyEquivalent: "h")
+        hideOthers.keyEquivalentModifierMask = [.command, .option]
+        appMenu.addItem(withTitle: "Show All", action: #selector(NSApplication.unhideAllApplications(_:)), keyEquivalent: "")
+        appMenu.addItem(.separator())
+        appMenu.addItem(withTitle: "Quit ClaudeSidian", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        appMenuItem.submenu = appMenu
+        mainMenu.addItem(appMenuItem)
+
+        // File menu (New Window)
+        let fileMenuItem = NSMenuItem()
+        let fileMenu = NSMenu(title: "File")
+        fileMenu.addItem(withTitle: "New Window", action: #selector(newWindow(_:)), keyEquivalent: "n")
+        fileMenuItem.submenu = fileMenu
+        mainMenu.addItem(fileMenuItem)
+
+        // Edit menu (for copy/paste)
+        let editMenuItem = NSMenuItem()
+        let editMenu = NSMenu(title: "Edit")
+        editMenu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        editMenu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        editMenuItem.submenu = editMenu
+        mainMenu.addItem(editMenuItem)
+
+        // View menu (font size)
+        let viewMenuItem = NSMenuItem()
+        let viewMenu = NSMenu(title: "View")
+        viewMenu.addItem(withTitle: "Bigger", action: #selector(biggerFont(_:)), keyEquivalent: "+")
+        viewMenu.addItem(withTitle: "Smaller", action: #selector(smallerFont(_:)), keyEquivalent: "-")
+        viewMenu.addItem(withTitle: "Reset Font Size", action: #selector(resetFont(_:)), keyEquivalent: "0")
+        viewMenuItem.submenu = viewMenu
+        mainMenu.addItem(viewMenuItem)
+
+        // Window menu
+        let windowMenuItem = NSMenuItem()
+        let windowMenu = NSMenu(title: "Window")
+        windowMenu.addItem(withTitle: "Close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+        windowMenu.addItem(withTitle: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
+        windowMenu.addItem(withTitle: "Zoom", action: #selector(NSWindow.performZoom(_:)), keyEquivalent: "")
+        windowMenuItem.submenu = windowMenu
+        mainMenu.addItem(windowMenuItem)
+
+        NSApp.mainMenu = mainMenu
+        NSApp.windowsMenu = windowMenu
+    }
+
+    // MARK: - Actions
+
+    @objc func newWindow(_ sender: Any) {
+        guard let config = currentConfig ?? AppConfig.load() else { return }
+        let wc = createTerminalWindow(with: config)
+        wc.showWindow()
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    // MARK: - Settings
+
+    @objc func openSettings(_ sender: Any) {
+        let config = currentConfig ?? AppConfig.load()
+        setupController = SetupWindowController(config: config) { [weak self] config in
+            self?.currentConfig = config
+            let alert = NSAlert()
+            alert.messageText = "Settings saved"
+            alert.informativeText = "New windows will use the updated settings."
+            alert.alertStyle = .informational
+            alert.addButton(withTitle: "OK")
+            alert.runModal()
+        }
+        setupController?.showWindow()
+    }
+
+    private func showSetup(config: AppConfig?) {
+        setupController = SetupWindowController(config: config) { [weak self] config in
+            self?.currentConfig = config
+            let wc = self?.createTerminalWindow(with: config)
+            NSApp.activate(ignoringOtherApps: true)
+            wc?.showWindow()
+        }
+        setupController?.showWindow()
+    }
+
+    // MARK: - Font Actions (apply to key window)
+
+    private var activeTerminalView: DroppableTerminalView? {
+        guard let keyWindow = NSApp.keyWindow else { return nil }
+        return windowControllers.first { $0.window === keyWindow }?.terminalView
+    }
 
     @objc func biggerFont(_ sender: Any) {
-        guard let tv = terminalView else { return }
+        guard let tv = activeTerminalView else { return }
         let size = tv.font.pointSize
         guard size < 72 else { return }
         tv.font = NSFont.monospacedSystemFont(ofSize: size + 1, weight: .regular)
     }
 
     @objc func smallerFont(_ sender: Any) {
-        guard let tv = terminalView else { return }
+        guard let tv = activeTerminalView else { return }
         let size = tv.font.pointSize
         guard size > 8 else { return }
         tv.font = NSFont.monospacedSystemFont(ofSize: size - 1, weight: .regular)
     }
 
     @objc func resetFont(_ sender: Any) {
-        terminalView?.font = NSFont.monospacedSystemFont(ofSize: 14, weight: .regular)
+        activeTerminalView?.font = NSFont.monospacedSystemFont(ofSize: 14, weight: .regular)
     }
 }
 
@@ -307,16 +370,57 @@ class CursorOverlayView: NSView {
 // MARK: - Drag & Drop Terminal View
 
 class DroppableTerminalView: LocalProcessTerminalView {
+    private var isUserScrolledUp = false
+    private var savedYDisp: Int = 0
+
     override init(frame: CGRect) {
         super.init(frame: frame)
         registerForDraggedTypes([.fileURL])
         setupFileClickMonitor()
+        setupScrollLock()
     }
 
     required init?(coder: NSCoder) {
         super.init(coder: coder)
         registerForDraggedTypes([.fileURL])
         setupFileClickMonitor()
+        setupScrollLock()
+    }
+
+    // MARK: - Scroll lock (prevent auto-scroll when user is reading scrollback)
+
+    private var scrollMonitor: Any?
+    private var keyMonitor: Any?
+
+    func setupScrollLock() {
+        scrollMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
+            guard let self = self,
+                  event.window === self.window else { return event }
+            DispatchQueue.main.async {
+                if self.scrollPosition >= 0.999 {
+                    self.isUserScrolledUp = false
+                } else if event.deltaY > 0 {
+                    self.isUserScrolledUp = true
+                    self.savedYDisp = self.getTerminal().buffer.yDisp
+                }
+            }
+            return event
+        }
+
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self = self,
+                  event.window === self.window else { return event }
+            self.isUserScrolledUp = false
+            return event
+        }
+    }
+
+    override func scrolled(source: Terminal, yDisp: Int) {
+        if isUserScrolledUp {
+            // Restore yDisp directly to prevent any visual jump
+            source.buffer.yDisp = savedYDisp
+        }
+        super.scrolled(source: source, yDisp: yDisp)
     }
 
     // MARK: - Cmd+Click file path detection
@@ -453,6 +557,8 @@ class DroppableTerminalView: LocalProcessTerminalView {
         if let m = clickMonitor { NSEvent.removeMonitor(m) }
         if let m = cursorMonitor { NSEvent.removeMonitor(m) }
         if let m = flagsMonitor { NSEvent.removeMonitor(m) }
+        if let m = scrollMonitor { NSEvent.removeMonitor(m) }
+        if let m = keyMonitor { NSEvent.removeMonitor(m) }
     }
 
     private func extractFilePath(displayRow: Int, col: Int) -> String? {
@@ -571,12 +677,10 @@ class DroppableTerminalView: LocalProcessTerminalView {
 // MARK: - Terminal Handler
 
 class TerminalHandler: LocalProcessTerminalViewDelegate {
-    weak var window: NSWindow?
-    weak var app: AppDelegate?
+    weak var windowController: TerminalWindowController?
 
-    init(window: NSWindow, app: AppDelegate) {
-        self.window = window
-        self.app = app
+    init(windowController: TerminalWindowController) {
+        self.windowController = windowController
     }
 
     func sizeChanged(source: LocalProcessTerminalView, newCols: Int, newRows: Int) {}
@@ -586,8 +690,8 @@ class TerminalHandler: LocalProcessTerminalViewDelegate {
     func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {}
 
     func processTerminated(source: TerminalView, exitCode: Int32?) {
-        DispatchQueue.main.async {
-            NSApp.terminate(nil)
+        DispatchQueue.main.async { [weak self] in
+            self?.windowController?.window.close()
         }
     }
 }
